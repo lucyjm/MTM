@@ -1,0 +1,54 @@
+/* ========================================================================================================================
+
+                              CREATE TESTING SITES WITH SENTINEL 2 IMAGERY FOR ACCURACY ASSESSMENT
+                              --------------------------------------------------------------------
+                        This script was adapted by Lucy Meyer as part of her work with SkyTruth.
+                        
+This script will create GEE Export tasks for you to download R-G-B-IR imagery from Sentinel 2, to match the years we're using in the MTM analysis script.
+This imagery can then be used for running the accuracy assessment. This script will export imagery only falling directly underneath given sample areas 
+(plots), plus a 1 kmbuffer around those sample plots.
+
+//=========================================================================================================================
+//                                    UPLOAD BUFFERED SAMPLE AREAS          
+//=========================================================================================================================*/
+//Link to original fusion table with sample areas in ESPG 5072: www.google.com/fusiontables/DataSource?docid=1EBwSxnU5VLmgZl_yv_4HNgVhUb08N9A_spz69oOf
+
+// Set the year for the sample area you want to make
+var year = 2016; // 2016 - 2018
+
+var sampleAreas = ee.FeatureCollection('ft:1EBwSxnU5VLmgZl_yv_4HNgVhUb08N9A_spz69oOf');
+print (sampleAreas);
+Map.addLayer(sampleAreas, {color: 'green'}, 'areas w/o buffer');
+var sampleAreaBuffer = sampleAreas.geometry().buffer(1000); // Sample areas buffered 1 km to get surroundings
+var exportbounds = sampleAreaBuffer.bounds();
+
+//Map.addLayer(currentAccuracyAreas, {color: 'green'}, 'areas w/o buffer');
+//Map.addLayer(sampleAreaBuffer,{color:'Red'},'areas w/ buffer');
+
+//=========================================================================================================================
+//                                    EXPORT S2 IMAGERY FOR ACCURACY ASSESSMENT          
+//=========================================================================================================================*/
+// The 'if' statements will select the proper imagery based on year, run TOA conversion (convert to radians), and apply a median filter (to smooth 
+// the image). 
+
+var s2 = ee.Image(ee.ImageCollection("COPERNICUS/S2").filterDate(year+"-01-01", year+"-12-31")
+  .filterMetadata("CLOUDY_PIXEL_PERCENTAGE", "less_than", 10)
+  .map(function(image){
+    var clipped = image.clip(sampleAreaBuffer);
+    return clipped.select('B2','B3','B4','B8');
+  })
+  //.median());
+.reduce(ee.Reducer.percentile([15])));
+
+Map.addLayer(s2,{bands:['B4_p15','B3_p15','B2_p15'], "max":2500, "gamma":1},'TOA '+year);
+
+// Exports to Drive
+Export.image.toDrive({
+  image: s2,
+  description: "REVISED_Sentinel2_"+year,
+  region: exportbounds,
+  scale: 10,
+  crs: "EPSG:5072", // Project to 4326 in QGIS
+  maxPixels: 1e10,
+  folder: "MTM"
+});
