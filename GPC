@@ -1,0 +1,232 @@
+/* ========================================================================================================================
+                                
+                                 SENTINEL-2 CLOUD-FREE MULTI-INDEX GREEN PIXEL COMPOSITES
+                                 ---------------------------------------------------------
+                        This script was created by Lucy Meyer as part of her work with SkyTruth.
+                        
+This script cleans Sentinel-2 imagery of data abnormalities and clouds using the F-mask algorithim adapted by Frantz et al 2018, adds eight standardized 
+vegetation indices, and exports cloud-free annual green pixel composites (maximum NDVI) of the study area. 
+//=========================================================================================================================
+//=========================================================================================================================
+//                                     UPLOAD STUDY AREA, IMAGERY, AND INDICES              
+//========================================================================================================================*/
+
+// Import Study Area and Export Bounds
+var studyArea = ee.FeatureCollection('ft:1Lphn5PR9YbneoY4sPkKGMUOJcurihIcCx0J82h7U');
+var exportbounds = studyArea.geometry().bounds();
+
+// Import Sentinel-2 Collection
+var s2_raw = ee.ImageCollection('COPERNICUS/S2').select('B1','B2','B3','B4','B5','B6','B7','B8','B8A','B9','B10','B11','B12', 'QA60')
+.filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10)); // Pre-filter to get less cloudy granules.
+
+// Clean Outlier Pixel Values
+var cleaner = function(outlierValue) {
+  return function(image) {
+    var minMask = image.mask().reduce(ee.Reducer.min());
+    var satMask = image.reduce(ee.Reducer.max()).lt(outlierValue);
+    var newMask = minMask.min(satMask).focal_min(3);
+    return(image.updateMask(newMask));
+  };
+};
+
+// Add Indices (NDVI, NDMI, NDWI, EVI, SAVI, MSAVI, NBR, NBR2)
+function addIndices(image) {
+  return image
+// NORMALIZED DIFFERENCE VEGETATION INDEX -- NDVI
+    .addBands(image.expression('(NIR - R) / (NIR + R)',
+    {R:image.select('B4'),NIR:image.select('B8')}).rename('NDVI'))
+// NORMALIZED DIFFERENCE MOISTURE INDEX -- NDMI
+    .addBands(image.expression('(NIR - SWIR) / (NIR +SWIR)',
+    {NIR:image.select('B8'),SWIR:image.select('B11')}).rename('NDMI'))
+// NORMALIZED DIFFERENCE WATER INDEX -- NDWI
+    .addBands(image.expression('(G - NIR) / (G + NIR)',
+    {G:image.select('B3'),NIR:image.select('B8')}).rename('NDWI'))
+// ENHANCED VEGETATION INDEX -- EVI
+    .addBands(image.expression('(G * ((NIR - R) / (NIR + C1 * R - C2 * B + L)))',
+    {G: 2.5,NIR: image.select('B8'),R: image.select('B4'),C1: 6,C2: 7.5,B: image.select('B2'),L: 1}).rename('EVI'))
+// SOIL ADJUSTED VEGETATION INDEX -- SAVI
+    .addBands(image.expression('(NIR - R) / ((NIR + R + L) * (C + L))',
+    {NIR: image.select('B8'),R: image.select('B4'),  C: 1,L: 0.5}).rename('SAVI'))
+// MODIFIED SOIL ADJUSTED VEGETATION INDEX -- MSAVI
+    .addBands(image.expression('((C * NIR - sqrt(((C * NIR + C2)**C3) - C4 * (NIR - R))) / C5)',
+    {C: 2,NIR: image.select('B8'),R: image.select('B4'),  C2: 1,C3: 2,C4: 8,C5: 2}).rename('MSAVI'))
+// NORMALIZED BURN RATIO -- NBR
+    .addBands(image.expression('(NIR - SWIR1) / (NIR + SWIR1)',
+    {NIR: image.select('B8'),SWIR1: image.select('B11')}).rename('NBR'))
+// NORMALIZED BURN RATIO 2 -- NBR2
+    .addBands(image.expression('(SWIR1 - SWIR2) / (SWIR1 + SWIR2)',
+    {SWIR1: image.select('B11'),SWIR2: image.select('B12')}).rename('NBR2'))
+
+    .select(['B2','B3','B4','B5','NDVI','NDMI','NDWI','EVI','SAVI','MSAVI','NBR','NBR2']);
+}
+
+/*=========================================================================================================================
+//                                           APPLY F-MASK ALGORITHIM              
+//=========================================================================================================================
+
+DESCRIPTION: To mask clouds in Sentinel 2 Imagery. 
+Model providided by Frantz et al 2018 (https://www.sciencedirect.com/science/article/pii/S0034425718302037)
+
+Bands involved: 
+  B7 - red edge 3(20m)
+  B8a - red edge 4 (20m)
+  B8 - NIR (10m --> Point Spread Fxn reduces resolution --> 20m)
+  B10 - Cirrus (60m --> NN, reduced resolution --> 20m)
+  
+PART 1: Cloud Displacement Index (CDI) (r- and v- images)
+Band ratios: 
+  R8A8: B8/B8A
+  R8A7: B7/B8A
+Texture:
+  V8A8: Kernel and convolve R8A8 by focal variance of width 7
+  V8A7: Kernel and convolve R8A7 by focal variance of width 7
+CDI:
+  = (V8A7-V8A8)/(V8A7+V8A8)
+
+PART 2: Cirrus Test
+B10 > 0.01 AND NOT Cloud AND NOT shadow
+
+PART 3: F-mask
+1. CDI followed by spatial filtering (erodes cloud layer by one pixel) to remove false positives (isolated pixels and linear features)
+  Potential Cloud Pixel (PCP) = CDI < 0-.5
+2. CAVEAT: In the case of extremely low altitude clouds, the conservative threshold of 0.5 produces patchy results (i.e. low altitude clouds are only 
+partially detected)
+--> Region growing performed on remaining cloud pixels: 
+  all pixels with CDI<−0.25 are added to the cloud layer
+3. Cloud shadow matching:
+  Described by Frantz et al.
+4. Final cloud classification:
+  B10 > 0.01 AND NOT Cloud AND NOT shadow
+5. Validation (not performed here)
+
+//========================================================================================================================*/
+
+// Display Raw S2 Collection for Each Study Year (2016, 2017, 2018)
+var Fraw16 = s2_raw.filterBounds(studyArea).filterDate('2016-01-01','2016-12-31');
+Map.addLayer(Fraw16,{bands:['B4','B3','B2'],min:0,max:3000},'Raw S2 2016',false);
+var Fraw17 = s2_raw.filterBounds(studyArea).filterDate('2017-01-01','2017-12-31');
+Map.addLayer(Fraw17,{bands:['B4','B3','B2'],min:0,max:3000},'Raw S2 2017',false);
+var Fraw18 = s2_raw.filterBounds(studyArea).filterDate('2018-01-01','2018-12-31');
+Map.addLayer(Fraw18,{bands:['B4','B3','B2'],min:0,max:3000},'Raw S2 2018',false);
+
+// Define Kernel Size
+var kernel = ee.Kernel.rectangle({xRadius:7,yRadius:7,units:'pixels'});
+
+/*
+// Test r-bands - R8A8 and R8A7 (for visual display purposes only)
+var testR8A8 = s2_raw.filterBounds(studyArea).filterDate('2016-01-01', '2016-12-31')
+  .map(function(image) {
+    return image
+    //POTENTIAL CLOUD PIXEL -- R8A8
+    .addBands(image.expression('(B8 / B8A)',
+    {B8:image.select('B8'), B8A:image.select('B8A')}).rename('testR8A8'))
+    
+  .select(['B2','B3','B4','B8','B8A','testR8A8'])
+  .rename(['B','G','R','B8','B8A','testR8A8']);
+  });
+
+var testR8A7 = s2_raw.filterBounds(studyArea).filterDate('2016-01-01', '2016-12-31')
+  .map(function(image) {
+    return image
+    //POTENTIAL CLOUD PIXEL -- R8A7
+    .addBands(image.expression('(B7 / B8A)',
+    {B7:image.select('B7'), B8A:image.select('B8A')}).rename('testR8A7'))
+    
+  .select(['B2','B3','B4','B7','B8A', 'testR8A7'])
+  .rename(['B','G','R','B7','B8A','testR8A7']);
+  });
+  
+Map.addLayer(testR8A8, {bands:['testR8A8'],min:0,max:1},'R8A8', false);
+Map.addLayer(testR8A7, {bands:['testR8A7'],min:0,max:1},'R8A7', false);
+
+// Test vBands - V8A8 and V8A7 (for visual display purposes only)
+var testV8A8 = testR8A8.map(function(image) {
+   return image
+  .addBands(image.select('testR8A8').convolve(kernel).rename('testV8A8'));
+});
+
+var testV8A7 = testR8A7.map(function(image) {
+   return image
+  .addBands(image.select('testR8A7').convolve(kernel).rename('testV8A7'));
+});
+
+Map.addLayer(testV8A8, {bands:['testV8A8'],min:0,max:1},'V8A8', false);
+Map.addLayer(testV8A7, {bands:['testV8A7'],min:0,max:1},'V8A7', false);
+// NOTE: Can't visualize CDI without operating under one function (steps below)
+*/ 
+
+// CLOUD DISPLACEMENT INDEX -- CDI : (V8A7 - V8A8) / (V8A7 + V8A8)
+var cdi_mask = function(cdiValue,b10Value) {
+  return function(image) {
+    var rImage = image.addBands(image.expression('B8 / B8A',{B8:image.select('B8'),B8A:image.select('B8A')}).rename('R8A8'))
+                      .addBands(image.expression('B7 / B8A',{B7:image.select('B7'),B8A:image.select('B8A')}).rename('R8A7'));
+    var vImage = rImage.addBands((rImage.select('R8A8').convolve(kernel)).rename('V8A8'))
+                       .addBands((rImage.select('R8A7').convolve(kernel)).rename('V8A7'));
+    var cdi = vImage.addBands(vImage.expression('(V8A7 - V8A8) / (V8A7 + V8A8)',{V8A7:vImage.select('V8A7'),V8A8:vImage.select('V8A8')}).rename('CDI'));
+    var cdiMasked = cdi.mask(cdi.select('CDI').lt(cdiValue).and(cdi.select('B10').lt(b10Value)));
+    return(cdiMasked);
+  };
+};
+
+/*========================================================================================================================
+//                                        APPLY INDICES AND MASK TO ANNUAL COMPOSITES           
+//========================================================================================================================*/
+
+// APPLY INDICES FOR EACH STUDY YEAR (2016, 2017, 2018)
+var F_indice16 = Fraw16
+  .map(cleaner(64256))
+  .map(cdi_mask(0.055,15))
+  .map(addIndices);
+//Map.addLayer(F_indice16,{bands:['B4','B3','B2'],min:0,max:3000},'Indices 2016', false);
+
+var F_indice17 = Fraw17
+  .map(cleaner(64256))
+  .map(cdi_mask(0.055,15))
+  .map(addIndices);
+//Map.addLayer(F_indice17,{bands:['B4','B3','B2'],min:0,max:3000},'Indices 2017', false);
+
+var F_indice18 = Fraw18
+  .map(cleaner(64256))
+  .map(cdi_mask(0.055,15))
+  .map(addIndices);
+//Map.addLayer(F_indice18,{bands:['B4','B3','B2'],min:0,max:3000},'Indices 2018', false);
+//print (indice18);
+
+/*========================================================================================================================
+//                                              EXPORT ANNUAL COMPOSITES           
+//========================================================================================================================*/
+
+//NOTE: There isn't a way to run through each year automatically, so we have to manually change this number each time
+
+var s2_processed = s2_raw.filterBounds(studyArea).filterDate('2016-01-01','2018-12-31').map(cleaner(64256)).map(cdi_mask(0.055,15)).map(addIndices);
+
+// var test = indice16.merge(indice17).merge(indice18)
+
+var year = 2018;
+// Make the annual composite for the year noted above
+var compositeFmask = s2_processed
+      .filter(ee.Filter.calendarRange(year, year, 'year'))
+      //.filter(ee.Filter.calendarRange(year, year+2, 'year')) // Three-year MSS
+      //.filter(ee.Filter.calendarRange(year, year+1, 'year')) // Two-year MSS
+      .filter(ee.Filter.calendarRange(5, 9, 'month'))
+      // The above line is for restricting imagery to summer months. The first
+        // number is the starting month, and the latter number is the ending 
+        // month inclusive. I don't know if May - September is the best choice
+      .qualityMosaic('NDVI') // Best selection for GPC 
+      .set({"year": year}); // This adds the year as a property to the image
+// Export to GEE asset
+var description = "Fmask_composite_"+year; // Be careful here with multi-year MSS
+Export.image.toAsset({
+  image: compositeFmask,
+  description: description,
+  assetId: ("users/lucyjmeyer/MTM_2"+description),
+  region: exportbounds,
+  scale: 10,
+  maxPixels: 1e10
+});
+Map.addLayer(compositeFmask,{bands:['B4','B3','B2'],min:0,max:3000},'S2 Composite '+year);
+
+// NOTE: There isn't a way to automatically turn all these Images into an ImageCollection, so you have to manually create that ImageCollection 
+// via the Asset manager in the GEE playground (the Asset tab on the top-left of the screen.) 
+//
+//
