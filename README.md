@@ -11,7 +11,7 @@ For this study, Sentinel-2 imagery was acquired and processed in Google Earth En
 - Script 1, SENTINEL-2 CLOUD-FREE MULTI-INDEX GREEN PIXEL COMPOSITES, creates an annual cloud-free, multi-index greenest pixel composite using
 - Script 2, ANNUAL THRESHOLD COMPOSITES, generates annual threshold composites
 - Script 3, CREATING TRAINING SITES FOR ACCURACY ASSESSMENT, produces imagery used for the testing sites
-- script 4, ANNUAL MINING AREA, generates an accuracy assessment, and vectors and statistics on active mining. 
+- Script 4, ANNUAL MINING AREA, generates an accuracy assessment, and vectors and statistics on active mining. 
 Scripts 2-4 were updated using source code from Pericak et al (2018).
 
 ## In-depth Description of Script Functions
