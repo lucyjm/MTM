@@ -4,8 +4,9 @@
                                  ---------------------------------------------------------
                         This script was created by Lucy Meyer as part of her work with SkyTruth.
                         
-This script cleans Sentinel-2 imagery of data abnormalities and clouds using the F-mask algorithim adapted by Frantz et al 2018, adds eight standardized 
-vegetation indices, and exports cloud-free annual green pixel composites (maximum NDVI) of the study area. 
+This script cleans Sentinel-2 imagery of data abnormalities and clouds using the F-mask algorithim adapted by Frantz et al.
+2018, adds eight standardized vegetation indices, and exports cloud-free annual green pixel composites (maximum NDVI) of the
+study area. 
 //=========================================================================================================================
 //=========================================================================================================================
 //                                     UPLOAD STUDY AREA, IMAGERY, AND INDICES              
