@@ -4,15 +4,15 @@ This work was performed by Lucy Meyer as part of her work at SkyTruth.
 ## Background
 This reposiory contains four scripts that are numbered by the order they were executed, followed by an underscore and the title of the script. The function of these tools are to evaluate the accuracy of mining classification using Google Earth Enginge and Sentinel-2 imagery. In addition, the basis of this work was to determine whether high-resolution imagery yields more accurate results than lower resolution imagery. 
 
-This study continues the research performed by a collaborative group from SkyTruth, Appalachian Voices, and Duke University. In July 2018, this group published a paper in the Open Access journal PLOS ONE called, “ Mapping the yearly extent of surface coal mining in Central Appalachia using Landsat and Google Earth Engine.” The orignial paper provided the first comprehensive map of annual surface coal mining extent in Central Appalachia from 1985 through 2015 using Google Earth Engine and Landsat imagery (Pericak et al., 2018 ). My research furthers the original the original, not only by updating the region’s yearly mining extent from 2016 to 2018 using Sentinel-2 imagery, but by executing an adapted F-mask cloud masking algorithm developed by Frantz et al (2018).
+This study continues the research performed by a collaborative group from SkyTruth, Appalachian Voices, and Duke University. In July 2018, the group published a paper in the Open Access journal PLOS ONE called, “ Mapping the yearly extent of surface coal mining in Central Appalachia using Landsat and Google Earth Engine.” The original paper provided the first comprehensive map of annual surface coal mining extent in Central Appalachia from 1985 through 2015 using Google Earth Engine and Landsat imagery (Pericak et al., 2018 ). My research furthers he original, not only by updating the region’s yearly mining extent from 2016 to 2018 using Sentinel-2 imagery, but by executing an adapted F-mask cloud masking algorithm (developed by Frantz et al., 2018).
 
 ## Summary of Scripts in Repository
-For this study, Sentinel-2 imagery was acquired and processed in Google Earth Engine’s application programming interface (API). In total, four scripts were composed:
-- Script 1 creates an annual cloud-free, multi-index greenest pixel composite using
-- Script 2 generates annual threshold composites
-- Script 3 produces imagery used for the testing sites
-- script 4 generates an accuracy assessment, and vectors and statistics on active mining. 
-Scripts 2-4 were upsated using source code from Pericak et al (2018).
+For this study, Sentinel-2 imagery was acquired and processed in Google Earth Engine’s application programming interface. In total, four scripts were composed:
+- Script 1, SENTINEL-2 CLOUD-FREE MULTI-INDEX GREEN PIXEL COMPOSITES, creates an annual cloud-free, multi-index greenest pixel composite using
+- Script 2, ANNUAL THRESHOLD COMPOSITES, generates annual threshold composites
+- Script 3, CREATING TRAINING SITES FOR ACCURACY ASSESSMENT, produces imagery used for the testing sites
+- script 4, ANNUAL MINING AREA, generates an accuracy assessment, and vectors and statistics on active mining. 
+Scripts 2-4 were updated using source code from Pericak et al (2018).
 
 ## In-depth Description of Script Functions
 ### 1 - SENTINEL-2 CLOUD-FREE MULTI-INDEX GREEN PIXEL COMPOSITES
