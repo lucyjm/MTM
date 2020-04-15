@@ -1,0 +1,598 @@
+/* ========================================================================================================================
+
+                             ACCURACY ASSESSMENT AND CHANGE DETECTION OF ANNUAL MINING AREA
+                            ----------------------------------------------------------------
+                        This script was adapted by Lucy Meyer as part of her work with SkyTruth.
+                        
+This script merges the new Sentinel-2 imagery and existing Landsat imagery, cleans the mining data, performes an accuracy assessment, and exports annual and cumulative mining footprints.
+==========================================================================================================================
+                              Greenist Pixel Composite Cleanup and Image Collection Merging
+==========================================================================================================================*/
+var ls_GPC = ee.ImageCollection('users/skytruth-data/MTR/greenestPixelComposites_multiIndex'); // Landsat
+var s2_GPC = ee.ImageCollection('users/skytruth-data/MTR/Lucy_S2_GPC');  //s2
+
+// Function to rename bands in S2 GPC so they match the format of bands in LS GPC
+var bandCleanup = function(image) {
+  var clean = image.select(['B2','B3','B4','B5','NDVI','NDMI','NDWI','EVI','SAVI','MSAVI','NBR','NBR2'])
+                   .rename(['B','G','R','NIR','NDVI','NDMI','NDWI','EVI','SAVI','MSAVI','NBR','NBR2']);
+  return(clean);
+}; 
+
+var s2_GPC_formatted = s2_GPC.map(bandCleanup); // applies renaming function
+
+// Filter Landsat GPCs to remove years after 2015 since they're being replaced by S2
+var ls_GPC_formatted = ls_GPC.filterMetadata('year','less_than',2016);
+
+var greenestComposites = ls_GPC_formatted.merge(s2_GPC_formatted); //merge two collections
+/* ========================================================================================================================
+                                           Threshold Image Processing and Merging
+=========================================================================================================================*/
+
+var s2Threshold_2016 = ee.Image('users/lucyjmeyer/MTM_2thresholds_0-3_2016');
+var s2Threshold_2017 = ee.Image('users/lucyjmeyer/MTM_2thresholds_0-3_2017');
+var s2Threshold_2018 = ee.Image('users/lucyjmeyer/MTM_2thresholds_0-3_2018');
+
+var lsThreshCollection = ee.ImageCollection('users/skytruth-data/MTR/annualThresholdImages_2017-Mask');
+var s2ThreshCollection = ee.ImageCollection([s2Threshold_2016,s2Threshold_2017,s2Threshold_2018]); // merge s2
+
+// match correct threshold comp to correct year
+var lsThreshImgList = lsThreshCollection.filterMetadata('year','less_than',2016).sort("year").toList(100);
+var lsThreshImgYrList = ee.List(lsThreshCollection.filterMetadata('year','less_than',2016).aggregate_array("year")).sort();
+// print (lsThreshImgList);
+// print (lsThreshImgYrList);
+
+var s2ThreshImgList = s2ThreshCollection.sort("year").toList(100);
+var s2ThreshImgYrList = ee.List(s2ThreshCollection.aggregate_array("year")).sort();
+
+// Combine the S2 and LS Threshold Image Lists
+var threshImgList = lsThreshImgList.cat(s2ThreshImgList); // processing ls
+var threshImgYrList = lsThreshImgYrList.cat(s2ThreshImgYrList); //cleaning s2
+//.cat - combining two lists
+/* ========================================================================================================================
+                                                   Import Study Area
+=========================================================================================================================*/
+// var studyArea = ee.FeatureCollection('ft:1Lphn5PR9YbneoY4sPkKGMUOJcurihIcCx0J82h7U') // convert ft to asset
+
+var studyArea = ee.FeatureCollection('users/lucyjmeyer/studyArea');
+
+/* ========================================================================================================================
+                                            Establish Export Areas by County
+=========================================================================================================================*/
+//var allCounties =  ee.FeatureCollection('ft:1S4EB6319wWW2sWQDPhDvmSBIVrD3iEmCLYB7nMM'); // convert ft to asset
+
+var fips_codes = [21013,21019,21025,21043,21051,21053,21063,21065,21071,21089,
+                  21095,21109,21115,21119,21121,21125,21127,21129,21131,21133,
+                  21135,21147,21153,21159,21165,21175,21189,21193,21195,21197,
+                  21199,21203,21205,21231,21235,21237,47001,47013,47025,47035,
+                  47049,47129,47133,47137,47141,47145,47151,51027,51051,51105,
+                  51167,51169,51185,51195,51720,54005,54011,54015,54019,54025,
+                  54039,54043,54045,54047,54053,54055,54059,54067,54075,54079,
+                  54081,54089,54099,54101,54109];
+
+var allCounties =  ee.FeatureCollection('users/lucyjmeyer/CountyGeo_Census');
+var features = allCounties.filter(ee.Filter.inList('FIPS', fips_codes));
+
+// This creates an image where each pixel is labeled with its FIPS code
+var countyImg = features.reduceToImage({
+  properties: ["FIPS"],
+  reducer: ee.Reducer.first()
+}).rename("FIPS");
+
+/* ========================================================================================================================
+                                                     Import Masks
+=========================================================================================================================*/
+// Roads, water bodies, urban areas, etc., buffered 60 m
+var mask_input_60m_2017 = ee.Image('users/skytruth-data/MTR/2017_Input-Mask_TR_4326').unmask();
+
+// All surface mining permits, buffered 1000 m
+// Link: https://drive.google.com/file/d/0B_PTuMKVy7beSWdZUkJIS3hneW8/view
+var miningPermits = ee.Image('users/andrewpericak/allMinePermits');
+
+var miningPermits_noBuffer = ee.Image('users/andrewpericak/allMinePermits_noBuffer');
+
+/* All surface mining permits, without any buffer. This excludes from the 60 m mask (mask_input_60m_2015)any areas within
+the the mine permit boundaries. Since the 60 m mask is "inversed" (i.e., 0 means keep and 1 means eventually mask), this 
+line sets the mine permit areas (labeled as 1) to 0.*/
+var mask_input_excludeMines = mask_input_60m_2017.where(miningPermits_noBuffer.eq(1), 0); //exclude areas in mask falling within mine permit boundary 
+// - we want roads to be associated with mining activity to be included (ignore mask in certain areas)
+
+/* ========================================================================================================================
+                                                     Mine Analysis
+=========================================================================================================================*/
+
+// RAW MINING
+// This compares the NDVI at each pixel to the given threshold. The resulting images are 1 = mine and 0 = non-mine.
+
+//duplicate NDVI as mineCandidate but keep NDVI as separate band
+var rawMining = ee.ImageCollection(greenestComposites.map(function(image){
+  var year = image.get("year");
+  var mineCandidate = image.select("NDVI").rename('mineCandidate');
+  var ndvi = image.select('NDVI');
+  var ndmi = image.select('NDMI');
+  var ndwi = image.select('NDWI');
+  var evi = image.select('EVI');
+  var savi = image.select('SAVI');
+  var msavi = image.select('MSAVI');
+  var nbr = image.select('NBR');
+  var nbr2 = image.select('NBR2');
+  
+  // This pulls the specific threshold image for the given year
+  var index = ee.Number(threshImgYrList.indexOf(year));
+  var threshold = ee.Image(threshImgList.get(index)); //threshold per year
+  
+  // This compares the NDVI per pixel to the NDVI threshold 
+  var lowNDVI = mineCandidate.lte(threshold); // var = low NDVI less than threshold - 1 valuable per county
+  return lowNDVI.set({"year": year}).addBands([ndvi,ndmi,ndwi,evi,savi,msavi,nbr,nbr2]);
+}));
+
+//// NULL-VALUE CLEANIING
+// This is the first step of the null-value cleaning (i.e., where there are no pixel values for that year 
+// due to cloud cover and a lack of raw imagery.) This function first creates a binary image where 1 = 
+// values that were null in the rawMining image, and where 0 = everything else.
+var nullCleaning1 = ee.ImageCollection(rawMining.map(function(image){
+  var year = image.get("year");
+  var unmasked = image.lt(2).unmask().not().clip(studyArea);
+  return unmasked.set({"year": year});
+}));
+
+// Create dummy images so the null cleaning will work; essentially for 1983 and 2017 (the years 
+// immediately before and after the years for which we have Landsat scenes), we need images of value 0 so
+// that the nullCleaning2 function below actually works. 
+
+//dummy is blank image - not bounded - image of whole planet every pi is 0 - purpose: help cleaning process
+//set before and after dataset time span
+
+var dummy1983 = ee.Image(0).rename("NDVI").set({"year": 1983});
+var dummy2019 = ee.Image(0).rename("NDVI").set({"year": 2019});
+
+var rawMining2 = ee.ImageCollection(rawMining.merge(ee.ImageCollection([dummy1983,dummy2019]))); //merge dummy to raw mining
+
+// Create two lists in order to help choose the immediate prior and future images for a given year. The 
+// first is a list of each image in the rawMining2 ImageCollection, sorted by year; the second is just a 
+// list of each year present in our dataset. These lists, used below, make running the code much more 
+// efficient than using filterMetadata() or anything like that. Similar lists seen below are achieving 
+// the same effect.
+// easier to read list
+var rm2List = rawMining2.sort("year").toList(100);
+var rm2YrList = ee.List(rawMining2.aggregate_array("year")).sort();
+
+// Looks at data error - operates on mineCanidate
+// This is the second step of the null-value cleaning. For each year, pull the raw mining images for the 
+// years immediately prior and future, where in those images 1 = mine and 0 = non-mine. Add those three 
+// images together; areas where the sum is 3 indicate that the null pixel is likely a mine, because that 
+// pixel was a mine in the prior and future years.
+// mine --> not mine --> mine: probably pixel, result of data error or non-pixel error --> set mineCanidate in second year
+var nullCleaning2 = ee.ImageCollection(nullCleaning1.map(function(image){
+  var year = ee.Number(image.get("year"));
+
+  var rm2Index = ee.Number(rm2YrList.indexOf(year));  // Get the index of the year that is being looked at
+  var priorIndex = rm2Index.subtract(1);              // The previous year index
+  var futureIndex = rm2Index.add(1);                  // The future year index
+  var imgPrevious = ee.Image(rm2List.get(priorIndex)).unmask();
+  var imgNext = ee.Image(rm2List.get(futureIndex)).unmask();
+      // Since the indices are the same for rm2List and rm2YrList, essentially use the index of the year 
+      // to select the corresponding image, which has the same index.
+      
+  var summation = image.add(imgPrevious).add(imgNext);
+  var potentialMine = summation.eq(3);
+      // In other words, if a null in current year (1) and a mine in past and future years (also 1), the 
+      // pixel in the current year will sum to 3
+  return potentialMine.set({"year": year});
+}));
+
+var nc2List = nullCleaning2.sort("year").toList(100);
+var nc2YrList = ee.List(nullCleaning2.aggregate_array("year")).sort();
+
+// This is the third step of the null-value cleaning. Use the results of the previous operation to turn 
+// any null values in the rawMining imagery into a value of 1 if they were also a value of 1 from the 
+// nullCleaning2 imagery.
+
+// sets to 1 so they can be classified as a mine
+var nullCleaning3 = ee.ImageCollection(rawMining.map(function(image){
+  var year = image.get("year");
+  var nc2Index = ee.Number(nc2YrList.indexOf(year));
+  var cleaningImg = ee.Image(nc2List.get(nc2Index));
+  var updatedRaw = image.unmask().add(cleaningImg);
+  return updatedRaw.set({"year": year});
+}));
+
+//// NOISE CLEANING 1 -- operating on detections rather than mineCandidate
+// Now we have noise cleaning, to eliminate pixels that go from unmined->mine-> unmined, since the mine 
+// pixel is likely incorrect. Again we need dummy years for years without LS coverage, except this time
+// the dummy images have values of 1 because otherwise all the pixels near these years would get removed.
+var dummy1983a = ee.Image(1).rename("NDVI").set({"year": 1983});
+var dummy2019a = ee.Image(1).rename("NDVI").set({"year": 2019});
+
+var rawMining3 = ee.ImageCollection(nullCleaning3.merge(ee.ImageCollection([dummy1983a,dummy2019a])));
+var rm3List = rawMining3.sort("year").toList(100); // See explanation above
+var rm3YrList = ee.List(rawMining3.aggregate_array("year")).sort();
+
+var noiseCleaning1 = ee.ImageCollection(nullCleaning3.map(function(image){
+  var year = ee.Number(image.get("year"));
+  var rm3Index = ee.Number(rm3YrList.indexOf(year));
+  var priorIndex = rm3Index.subtract(1);
+  var futureIndex = rm3Index.add(1);
+  var imgPrevious = ee.Image(rm3List.get(priorIndex));
+  var imgNext = ee.Image(rm3List.get(futureIndex));
+  // Relabel images so that pixels that are mine in current year but not mine
+  // in previous/next years are labeled 111 when summed
+  var relabelPrevious = imgPrevious.remap([0,1],[100,-10]);
+  var relabelNext = imgNext.remap([0,1],[10,-10]);
+  var summation = image.add(relabelPrevious).add(relabelNext);
+  var potentialNoise = summation.eq(111);
+      // Mine in current year = 1; non-mine in past year = 100; non-mine in 
+      // future year = 10; therefore we want sum of 111
+  return image.where(potentialNoise.eq(1),0).set({"year":year});
+}));
+
+//// NOISE CLEANING 2
+// And more noise cleaning, now to eliminate pixels that go from mined->unmined-> mined, since the unmined
+// pixel is likely incorrect. We need the 0-value dummy images from above.
+var rawMining4 = ee.ImageCollection(noiseCleaning1.merge(ee.ImageCollection([dummy1983,dummy2019])));
+var rm4List = rawMining4.sort("year").toList(100); // See explanation above
+var rm4YrList = ee.List(rawMining4.aggregate_array("year")).sort();
+
+var noiseCleaning2 = ee.ImageCollection(noiseCleaning1.map(function(image){
+  var year = ee.Number(image.get("year"));
+  var rm4Index = ee.Number(rm4YrList.indexOf(year));
+  var priorIndex = rm4Index.subtract(1);
+  var futureIndex = rm4Index.add(1);
+  var imgPrevious = ee.Image(rm4List.get(priorIndex));
+  var imgNext = ee.Image(rm4List.get(futureIndex));
+  // Relabel images so that pixels that are mine in current year but not mine
+  // in previous/next years are labeled 111 when summed
+  var relabelPrevious = imgPrevious.remap([0,1],[-10,900]);
+  var relabelNext = imgNext.remap([0,1],[-10,90]);
+  var summation = image.add(relabelPrevious).add(relabelNext);
+  var potentialNoise = summation.eq(990);
+      // Mine in current year = 1; non-mine in past year = 100; non-mine in 
+      // future year = 10; therefore we want sum of 111
+  return image.where(potentialNoise.eq(1),1).set({"year":year});
+}));
+
+
+//// FINAL CLEANING AND OUTPUT
+// This final function performs other cleaning (mask, erosion/dilation, mine permit boundaries) to further
+// clean up the mining dataset.
+var mining = ee.ImageCollection(noiseCleaning2.map(function(image){
+  var year = ee.Number(image.get("year"));
+// Create binary image containing the intersection between the LowNDVI and anywhere the inverted mask is 0
+  var mines = image.select('mineCandidate').and(mask_input_excludeMines.eq(0));
+  
+  // Mask mine layer by itself; label with specific year (for viz)
+  var minesMasked = mines.updateMask(mines).multiply(year).rename('year').toInt();
+  
+  // Remove small, noisy pixel areas (remember, this is dependent on zoom level)
+  var smallAreaMask = minesMasked.connectedPixelCount().gte(10);
+  var noSmall = minesMasked.updateMask(smallAreaMask);
+  
+  // Compute area per pixel
+  var area = ee.Image.pixelArea().multiply(noSmall).divide(year).rename('area').toFloat();
+  
+  return image.addBands(noSmall).addBands(area).addBands(countyImg);
+}));
+
+/* ========================================================================================================================
+                                                     ACCURACY ASSESSMENT
+=========================================================================================================================*/
+// This will add properties to each yearly image, reporting overall accuracy (accuracy), kappa coefficient (kappa), 
+// user's error (user), and producer's error (producer)
+
+var accuracy = mining.select("year").map(function(image){
+  var year = image.get('year');
+  image = image.gt(0).unmask();
+  // The next line is a Fusion Table containing all manually-classified points as one table. This table 
+  // must contain a binary column called CLASS where value 0 = non-mine and value 1 = mine.
+  
+  // var points = ee.FeatureCollection('users/skytruth-data/MTR/Classification_Points/MTM_Classification_Points_1984_2018_created_2018_12_27')
+  //   .filterMetadata("YEAR","equals",year);
+  
+  // Lucy's Points
+  var points = ee.FeatureCollection('users/skytruth-data/MTR/Classification_Points/LM_S2_MTM_Point_Classification_Tracking')
+    .filterMetadata("YEAR","equals",year);
+  
+  var output = image.sampleRegions(points, ['CLASS'], 30);
+  var error_matrix = output.errorMatrix('CLASS', 'year');
+  return image.set({"accuracy": error_matrix.accuracy(), 
+    "kappa": error_matrix.kappa(),
+    "user": error_matrix.consumersAccuracy().toList().flatten(), 
+    "producer": error_matrix.producersAccuracy().toList().flatten(), 
+    "year": year});
+});
+
+// This turns the accuracy assessement values into blank geometries, so that they can be exported into tables.
+var accuracyCollection = ee.FeatureCollection(accuracy.map(function(image){
+    var dict = ee.Dictionary({});
+    var year = image.get("year");
+    var accuracy = image.get("accuracy");
+    var kappa = image.get("kappa");
+    var user = image.get("user");
+    var producer = image.get("producer");
+    
+    dict = ee.Dictionary(ee.Dictionary(ee.Dictionary(ee.Dictionary(dict
+      .set("accuracy",accuracy))
+      .set("kappa",kappa))
+      .set("user",user))
+      .set("producer",producer))
+      .set("year",year);
+    return ee.Feature(ee.Geometry.Point(0,0),dict);
+}));
+
+// ========================================================================================================================
+//                                     SUMMARIZE MINING AREA PER FEATURE PER YEAR                      
+// ========================================================================================================================
+// This creates a table listing the area of active mining per year, per subregion noted above (either 
+// county or rectangle).
+
+var getFeatures = function(feature) {
+  var fips = feature.get("FIPS");
+  return mining.map(function(image) {
+    var yearlyArea = image.select('area').reduceRegion({
+      reducer: 'sum', 
+      geometry: feature.geometry(), 
+      scale: 10,
+      crs: "EPSG:5072",
+      maxPixels: 1e13
+    });
+    return image.set(yearlyArea).set({"FIPS": fips});
+  });
+};
+var miningArea = features.map(getFeatures).flatten();
+
+// ========================================================================================================================
+//                                                    EXPORT TO VECTORS                      
+// ========================================================================================================================
+// This will export the active mining areas for a given year as polygons, where each polygon will be 
+// labeled with its EE-calcuated area and the year
+
+// Set the year of export here
+var vectorYr = 2016;
+
+/* ====================================== CREATE STATS IMAGES ========================================= */
+
+// creates 9 images from bands that are avaliable, vectorized LATER
+
+// Area Sum
+var vectorImg1 = ee.Image(mining.filterMetadata("year","equals",vectorYr).first()).select("year","area");
+
+// NDVI MEAN
+var vectorImg2 = ee.Image(mining.filterMetadata("year","equals",vectorYr).first()).select("year","NDVI");
+
+// NDMI Mean
+var vectorImg3 = ee.Image(mining.filterMetadata("year","equals",vectorYr).first()).select("year","NDMI");
+
+// NDWI Mean
+var vectorImg4 = ee.Image(mining.filterMetadata("year","equals",vectorYr).first()).select("year","NDWI");
+  
+// EVI Mean
+var vectorImg5 = ee.Image(mining.filterMetadata("year","equals",vectorYr).first()).select("year","EVI");
+  
+// SAVI Mean
+var vectorImg6 = ee.Image(mining.filterMetadata("year","equals",vectorYr).first()).select("year","SAVI");
+
+// MSAVI Mean
+var vectorImg7 = ee.Image(mining.filterMetadata("year","equals",vectorYr).first()).select("year","MSAVI");
+
+// NBR Mean
+var vectorImg8 = ee.Image(mining.filterMetadata("year","equals",vectorYr).first()).select("year","NBR");
+
+// NBR2 Mean
+var vectorImg9 = ee.Image(mining.filterMetadata("year","equals",vectorYr).first()).select("year","NBR2");
+
+// CREATE THE OUTPUT VECTOR
+var vectors1 = vectorImg1.reduceToVectors({reducer: ee.Reducer.sum(),geometry: features.geometry(),
+                                           scale: 10,crs: "EPSG:5072",labelProperty: "year",
+                                           maxPixels: 1e13}).set({"year":vectorYr}); // change to 1e13 if prob
+var vectors2 = vectorImg2.reduceToVectors({reducer: ee.Reducer.mean().setOutputs(['ndvi_mean']),
+                                           geometry: features.geometry(),scale: 10, crs: "EPSG:5072",
+                                           labelProperty: "year",maxPixels: 1e13}).set({"year":vectorYr});
+var vectors3 = vectorImg3.reduceToVectors({reducer: ee.Reducer.mean().setOutputs(['ndmi_mean']),
+                                           geometry: features.geometry(),scale: 10, crs: "EPSG:5072",
+                                           labelProperty: "year",maxPixels: 1e13}).set({"year":vectorYr});
+var vectors4 = vectorImg4.reduceToVectors({reducer: ee.Reducer.mean().setOutputs(['ndwi_mean']),
+                                           geometry: features.geometry(), scale: 10, crs: "EPSG:5072",
+                                           labelProperty: "year",maxPixels: 1e13}).set({"year":vectorYr});
+var vectors5 = vectorImg5.reduceToVectors({reducer: ee.Reducer.mean().setOutputs(['evi_mean']),
+                                           geometry: features.geometry(),scale: 10,crs: "EPSG:5072",
+                                           labelProperty: "year",maxPixels: 1e13}).set({"year":vectorYr});
+var vectors6 = vectorImg6.reduceToVectors({reducer: ee.Reducer.mean().setOutputs(['savi_mean']),
+                                           geometry: features.geometry(),scale: 10,crs: "EPSG:5072",
+                                           labelProperty: "year",maxPixels: 1e13}).set({"year":vectorYr});
+var vectors7 = vectorImg7.reduceToVectors({reducer: ee.Reducer.mean().setOutputs(['msavi_mean']),
+                                           geometry: features.geometry(),scale: 10,crs: "EPSG:5072",
+                                           labelProperty: "year",maxPixels: 1e13}).set({"year":vectorYr});
+var vectors8 = vectorImg8.reduceToVectors({reducer: ee.Reducer.mean().setOutputs(['nbr_mean']),
+                                           geometry: features.geometry(),scale: 10,crs: "EPSG:5072",
+                                           labelProperty: "year",maxPixels: 1e13}).set({"year":vectorYr});
+var vectors9 = vectorImg9.reduceToVectors({reducer: ee.Reducer.mean().setOutputs(['nbr2_mean']),
+                                           geometry: features.geometry(),scale: 10,crs: "EPSG:5072",
+                                           labelProperty: "year",maxPixels: 1e13}).set({"year":vectorYr});
+// Prepping for a lot of joins
+var spatialFilter = ee.Filter.intersects({leftField: '.geo',rightField: '.geo'});
+var joiner_1 = ee.Join.saveFirst({matchKey:'ndvi_mean'});
+var joiner_2 = ee.Join.saveFirst({matchKey:'ndmi_mean'});
+var joiner_3 = ee.Join.saveFirst({matchKey:'ndwi_mean'});
+var joiner_4 = ee.Join.saveFirst({matchKey:'evi_mean'});
+var joiner_5 = ee.Join.saveFirst({matchKey:'savi_mean'});
+var joiner_6 = ee.Join.saveFirst({matchKey:'msavi_mean'});
+var joiner_7 = ee.Join.saveFirst({matchKey:'nbr_mean'});
+var joiner_8 = ee.Join.saveFirst({matchKey:'nbr2_mean'});
+
+// See: https://code.earthengine.google.com/f78bf69366f85497f01536e2efe985dd
+
+// Join One
+var joined_1_pre = joiner_1.apply(vectors1,vectors2,spatialFilter); //mean NDVI and mean NDMI --> spatial join btwn overlap poly
+var joined_1_fin = joined_1_pre.map(function(f) {
+  var f1 = ee.Feature(f);
+  var f2 = ee.Feature(f.get('ndvi_mean')).toDictionary();
+  var fin = ee.Feature(f).set(f2);
+  return(fin);
+});
+
+// Join Two
+var joined_2_pre = joiner_2.apply(joined_1_fin,vectors3,spatialFilter);
+var joined_2_fin = joined_2_pre.map(function(f) {
+  var f1 = ee.Feature(f);
+  var f2 = ee.Feature(f.get('ndmi_mean')).toDictionary();
+  var fin = ee.Feature(f).set(f2);
+  return(fin);
+});
+
+// Join Three
+var joined_3_pre = joiner_3.apply(joined_2_fin,vectors4,spatialFilter);
+var joined_3_fin = joined_3_pre.map(function(f) {
+  var f1 = ee.Feature(f);
+  var f2 = ee.Feature(f.get('ndwi_mean')).toDictionary();
+  var fin = ee.Feature(f).set(f2);
+  return(fin);
+});
+
+// Join Four
+var joined_4_pre = joiner_4.apply(joined_3_fin,vectors5,spatialFilter);
+var joined_4_fin = joined_4_pre.map(function(f) {
+  var f1 = ee.Feature(f);
+  var f2 = ee.Feature(f.get('evi_mean')).toDictionary();
+  var fin = ee.Feature(f).set(f2);
+  return(fin);
+});
+
+// Join Five
+var joined_5_pre = joiner_5.apply(joined_4_fin,vectors6,spatialFilter);
+var joined_5_fin = joined_5_pre.map(function(f) {
+  var f1 = ee.Feature(f);
+  var f2 = ee.Feature(f.get('savi_mean')).toDictionary();
+  var fin = ee.Feature(f).set(f2);
+  return(fin);
+});
+
+// Join Six
+var joined_6_pre = joiner_6.apply(joined_5_fin,vectors7,spatialFilter);
+var joined_6_fin = joined_6_pre.map(function(f) {
+  var f1 = ee.Feature(f);
+  var f2 = ee.Feature(f.get('msavi_mean')).toDictionary();
+  var fin = ee.Feature(f).set(f2);
+  return(fin);
+});
+
+// Join Seven
+var joined_7_pre = joiner_7.apply(joined_6_fin,vectors8,spatialFilter);
+var joined_7_fin = joined_7_pre.map(function(f) {
+  var f1 = ee.Feature(f);
+  var f2 = ee.Feature(f.get('nbr_mean')).toDictionary();
+  var fin = ee.Feature(f).set(f2);
+  return(fin);
+});
+
+// Join Eight
+var joined_8_pre = joiner_8.apply(joined_7_fin,vectors9,spatialFilter);
+var joined_8_fin = joined_8_pre.map(function(f) {
+  var f1 = ee.Feature(f);
+  var f2 = ee.Feature(f.get('nbr2_mean')).toDictionary();
+  var fin = ee.Feature(f).set(f2);
+  return(fin);
+});
+//single vector will mean indices
+
+// ========================================================================================================================
+//                                                      EXPORTS 
+// ========================================================================================================================
+var exportFolder = 'MTM'; //changes
+
+// Active Mining Year Vectors, set vectorYr on line 330
+Export.table.toDrive({
+  collection: joined_8_fin,
+  description: "collection_Vectors_withStats_"+vectorYr,
+  folder: exportFolder,
+  fileFormat: "geojson"
+});
+
+// accuracyCollection CSV
+Export.table.toDrive({
+  collection: accuracyCollection,
+  description: "accuracyAssessmentResults",
+  folder: exportFolder,
+  fileFormat: "csv"
+});
+
+// CSV of Active Mine Footprint by Year
+Export.table.toDrive({
+  collection: miningArea,
+  description: "yearlyActiveMiningArea",
+  folder: exportFolder,
+  fileFormat: "csv"
+});
+
+// Yearly Mining Footprint
+var yearlyMining_raster = ee.Image(mining.filterMetadata("year","equals",vectorYr).first()).select("year").unmask();
+Export.image.toDrive({
+  image: yearlyMining_raster,
+  description: "active_mining_footprint_"+vectorYr,
+  folder: exportFolder,
+  region: studyArea.geometry(),
+  scale: 10, // CHANGE TO 10 FOR S2 YEARS 2016+ // vv 30 for landsat
+  crs: "EPSG:5072", //not understanding how GEE dealt with area calcs
+  maxPixels: 1e13 //1e13
+});
+
+// Yearly Mining Footprint with Data
+var yearMiningData = ee.Image(mining.filterMetadata("year","equals",vectorYr).first())
+  .select(['NDVI','NDMI','NDWI','EVI','SAVI','MSAVI','NBR','NBR2','year','area'])
+  .cast({'NDVI':'float','NDMI':'float','NDWI':'float','EVI':'float','SAVI':'float',
+  'MSAVI':'float','NBR':'float','NBR2':'float','year':'float','area':'float','FIPS':'float'});
+Export.image.toDrive({
+  image: yearMiningData,
+  description: "mining_data_"+vectorYr,
+  folder: exportFolder,
+  region: studyArea.geometry(),
+  scale: 10, // CHANGE TO 10 FOR S2 YEARS 2016+ AND 30 FOR LANDSAT
+  crs: "EPSG:5072",
+  maxPixels: 1e13 // 1e13
+});
+
+// Cumulative Mining Footprint
+var cumulativeArea = mining.filterMetadata("year","greater_than",1984)
+                           .filterMetadata("year","less_than",2019)
+                           .reduce(ee.Reducer.anyNonZero());
+
+// This will give the number in square meters (print the output)
+var TCA_pixelArea = cumulativeArea.select("mining_any").multiply(ee.Image.pixelArea()); //total connected area
+
+var TCA_reducer = TCA_pixelArea.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: features.geometry(),
+  scale: 30,
+  crs: "EPSG:5072",
+  maxPixels:1e10
+});
+
+Export.image.toDrive({
+  image: cumulativeArea,
+  description: "CumulativeMineArea_1985-2017",
+  folder: 'MTM',
+  region: studyArea.geometry(),
+  scale: 30,
+  crs: "EPSG:5072",
+  maxPixels: 1e10
+});
+// ========================================================================================================================
+// ========================================================================================================================
+
+print(accuracy);
+
+// VISUALIZE
+var s2DisplayYear = 2017;
+var lsDisplayYear = 2015;
+
+var s2GreenestCompositesYear = ee.Image("users/skytruth-data/MTR/Lucy_S2_GPC/Fmask_composite_"+s2DisplayYear);
+var lsGreenestCompositesYear = ee.Image("users/skytruth-data/MTR/greenestPixelComposites_multiIndex/composite_"+lsDisplayYear);
+
+Map.addLayer(lsGreenestCompositesYear,{bands:['R','G','B'],min:0,max:0.25},'Landsat Composite - '+lsDisplayYear);
+Map.addLayer(s2GreenestCompositesYear,{bands:['B4','B3','B2'],min:0,max:2500},'S2 Composite - '+s2DisplayYear);
+
+var lsPalette = ['C0FF00','E0FF00','FFFD00','FFDD00','FFBE00','FF9E00','FF7E00','FF5F00','FF3F00','FF1F00','FF0000'];
+var s2Palette = ['AF0D0D','750F0F','3C1111'];
+
+Map.addLayer(mining.filterMetadata("year","less_than",2016),{palette:lsPalette, bands:["year"], min:1983, max:2015},"LS Derived Active Mining");
+Map.addLayer(mining.filterMetadata("year","greater_than",2015),{palette:s2Palette, bands:["year"], min:2016, max:2018},"S2 Derived Active Mining");
+
+//2019 composite cant be run until oct 1 because we need image until sept, results from 2018 not publishable bc can't be fully cleaned
