@@ -4,7 +4,7 @@
                               --------------------------------------------------------------------
                         This script was adapted by Lucy Meyer as part of her work with SkyTruth.
                         
-This script will create GEE Export tasks for you to download R-G-B-IR imagery from Sentinel 2, to match the years we're using in the MTM analysis script.
+This script will create GEE Export tasks for you to download R-G-B-IR imagery from Sentinel 2, to match the years used in the original MTM analysis script.
 This imagery can then be used for running the accuracy assessment. This script will export imagery only falling directly underneath given sample areas 
 (plots), plus a 1 kmbuffer around those sample plots.
 
